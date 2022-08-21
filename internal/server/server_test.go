@@ -2,20 +2,41 @@ package server
 
 import (
 	"context"
+	"flag"
 	"net"
 	"os"
 	"testing"
+	"time"
 
 	api "github.com/kumatch-sandbox/proglog/api/v1"
 	"github.com/kumatch-sandbox/proglog/internal/auth"
 	"github.com/kumatch-sandbox/proglog/internal/config"
 	"github.com/kumatch-sandbox/proglog/internal/log"
 	"github.com/stretchr/testify/require"
+	"go.opencensus.io/examples/exporter"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 )
+
+var debug = flag.Bool("debug", false, "Enable observability for debugging.")
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+
+	if *debug {
+		logger, err := zap.NewDevelopment()
+		if err != nil {
+			panic(err)
+		}
+
+		zap.ReplaceGlobals(logger)
+	}
+
+	os.Exit(m.Run())
+}
 
 func TestServer(t *testing.T) {
 	scenarios := map[string]func(
@@ -63,6 +84,33 @@ func newClient(csrPath, keyPath string, listen net.Listener) (*grpc.ClientConn, 
 	return conn, client, opts, nil
 }
 
+func newTelemetryExporter(t *testing.T) (*exporter.LogExporter, error) {
+	metricsLogFile, err := os.CreateTemp("", "metrics-*.log")
+	if err != nil {
+		return nil, err
+	}
+	t.Logf("metrics log file: %s", metricsLogFile.Name())
+
+	tracesLogFile, err := os.CreateTemp("", "traces-*.log")
+	if err != nil {
+		return nil, err
+	}
+	t.Logf("traces log file: %s", tracesLogFile.Name())
+
+	telemetryExporter, err := exporter.NewLogExporter(
+		exporter.Options{
+			MetricsLogFile:    metricsLogFile.Name(),
+			TracesLogFile:     tracesLogFile.Name(),
+			ReportingInterval: time.Second,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return telemetryExporter, nil
+}
+
 func setupTest(t *testing.T, fn func(*Config)) (
 	rootClient api.LogClient,
 	nobodyClient api.LogClient,
@@ -75,11 +123,13 @@ func setupTest(t *testing.T, fn func(*Config)) (
 
 	var rootConn, nobodyConn *grpc.ClientConn
 
+	// setup clients (root and nobody)
 	rootConn, rootClient, _, err = newClient(config.RootClientCertFile, config.RootClientKeyFile, listen)
 	require.NoError(t, err)
 	nobodyConn, nobodyClient, _, err = newClient(config.NobodyClientCertFile, config.NobodyClientKeyFile, listen)
 	require.NoError(t, err)
 
+	// setup server
 	serverTLSConfig, err := config.SetupTLSConfig(config.TLSConfig{
 		CertFile:      config.ServerCertFile,
 		KeyFile:       config.ServerKeyFile,
@@ -98,6 +148,15 @@ func setupTest(t *testing.T, fn func(*Config)) (
 
 	authorizer, err := auth.New(config.ACLModelFile, config.ACLPolicyFile)
 	require.NoError(t, err)
+
+	var telemetryExporter *exporter.LogExporter
+	if *debug {
+		telemetryExporter, err = newTelemetryExporter(t)
+		require.NoError(t, err)
+
+		err = telemetryExporter.Start()
+		require.NoError(t, err)
+	}
 
 	cfg = &Config{
 		CommitLog:  commitLog,
@@ -118,7 +177,12 @@ func setupTest(t *testing.T, fn func(*Config)) (
 		nobodyConn.Close()
 		server.Stop()
 		listen.Close()
-		commitLog.Remove()
+
+		if telemetryExporter != nil {
+			time.Sleep(1500 * time.Millisecond)
+			telemetryExporter.Stop()
+			telemetryExporter.Close()
+		}
 	}
 
 	return rootClient, nobodyClient, cfg, teardown
