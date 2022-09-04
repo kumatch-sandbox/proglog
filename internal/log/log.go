@@ -102,7 +102,7 @@ func (l *Log) Remove() error {
 	return os.RemoveAll(l.Dir)
 }
 
-func (l *Log) Setup() error {
+func (l *Log) Reset() error {
 	if err := l.Remove(); err != nil {
 		return err
 	}
