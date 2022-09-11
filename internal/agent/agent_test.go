@@ -15,6 +15,7 @@ import (
 	"github.com/travisjeffery/go-dynaport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 )
 
 func TestAgent(t *testing.T) {
@@ -60,6 +61,7 @@ func TestAgent(t *testing.T) {
 			ACLPolicyFile:   config.ACLPolicyFile,
 			ServerTLSConfig: serverTLSConfig,
 			PeerTLSConfig:   peerTLSConfig,
+			Bootstrap:       i == 0,
 		})
 		require.NoError(t, err)
 
@@ -76,6 +78,7 @@ func TestAgent(t *testing.T) {
 	// ノード同士がお互いを発見する時間を確保
 	time.Sleep(3 * time.Second)
 
+	// リーダーへ１つのレコードを生成
 	leaderClient := client(t, agents[0], peerTLSConfig)
 	ctx := context.Background()
 	want := []byte("hello, world")
@@ -87,12 +90,31 @@ func TestAgent(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	consumeRes, err := leaderClient.Consume(
+	// レプリケーションの完了を待つ
+	time.Sleep(3 * time.Second)
+
+	// フォロワー（レプリカサーバ）でコードがレプリケーションされたことを確認
+	followerClient := client(t, agents[1], peerTLSConfig)
+	consumeRes, err := followerClient.Consume(
 		ctx,
 		&api.ConsumeRequest{Offset: produceRes.Offset},
 	)
 	require.NoError(t, err)
 	require.Equal(t, consumeRes.Record.Value, want)
+
+	// 追加のレプリケーション待ち
+	time.Sleep(3 * time.Second)
+
+	// フォロワーでのレプリケーションに対し、リーダー側へ再レプリケーションが行われないことを確認
+	consumeRes, err = leaderClient.Consume(
+		ctx,
+		&api.ConsumeRequest{Offset: produceRes.Offset + 1},
+	)
+	require.Nil(t, consumeRes)
+	require.Error(t, err)
+	got := status.Code(err)
+	want2 := status.Code(api.ErrOffsetOutOfRange{}.GRPCStatus().Err())
+	require.Equal(t, got, want2)
 }
 
 func client(t *testing.T, agent *agent.Agent, tlsConfig *tls.Config) api.LogClient {
