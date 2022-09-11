@@ -57,35 +57,40 @@ func (dl *DistributedLog) setupLog(dataDir string) error {
 }
 
 func (dl *DistributedLog) setupRaft(dataDir string) error {
+	var err error
 	raftDir := filepath.Join(dataDir, "raft")
+
+	// Raft が与えられたコマンドを適用する有限ステートマシン
 	fsm := &fsm{log: dl.log}
 
+	// Raft がそれらのコマンドを保存するログストア (log store)
 	logDir := filepath.Join(raftDir, "log")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return err
 	}
-
 	logConfig := dl.config
 	logConfig.Segment.InitialOffset = 1
-
-	var err error
 	dl.raftLog, err = newLogStore(logDir, logConfig)
 	if err != nil {
 		return err
 	}
 
+	// Raft がクラスタの構成（クラスタ内のサーバやアドレスなど）を保存ずる安定ストア (stable store)
 	stableDir := filepath.Join(raftDir, "stable")
 	stableStore, err := raftboltdb.NewBoltStore(stableDir)
 	if err != nil {
 		return err
 	}
 
+	// Raft がコンパクトなスナップショットを保存するスナップショットストア (snapshot store)
+	// 効率的にデータ復旧をするための使われる
 	retain := 1
 	snapshotStore, err := raft.NewFileSnapshotStore(raftDir, retain, os.Stderr)
 	if err != nil {
 		return err
 	}
 
+	// Raft が他の Raft サーバと接続するために使うトランスポート
 	maxPool := 5
 	timeout := 10 * time.Second
 	transport := raft.NewNetworkTransport(
@@ -95,8 +100,10 @@ func (dl *DistributedLog) setupRaft(dataDir string) error {
 		os.Stderr,
 	)
 
+	// その他 Raft 設定
 	config := raft.DefaultConfig()
 	config.LocalID = dl.config.Raft.LocalID
+	// 以下設定値は動作環境次第で変更、あるいはテスト実行時に効率あげる目的で都合よく差し替えられるように
 	if dl.config.Raft.HeartbeatTimeout != 0 {
 		config.HeartbeatTimeout = dl.config.Raft.HeartbeatTimeout
 	}
@@ -110,6 +117,7 @@ func (dl *DistributedLog) setupRaft(dataDir string) error {
 		config.CommitTimeout = dl.config.Raft.CommitTimeout
 	}
 
+	// Raft インスタンス作成のために、上記までのすべての用意、設定する必要がある
 	dl.raft, err = raft.NewRaft(
 		config,
 		fsm,
@@ -127,6 +135,7 @@ func (dl *DistributedLog) setupRaft(dataDir string) error {
 		return err
 	}
 
+	// 設定値で起動フラグを立てて、サーバ起動のためのブートストラップ処理を行わせる
 	if dl.config.Raft.Bootstrap && !hasState {
 		config := raft.Configuration{
 			Servers: []raft.Server{
@@ -139,6 +148,7 @@ func (dl *DistributedLog) setupRaft(dataDir string) error {
 	return err
 }
 
+// Append は Log 型と同じAPIにして互換性を持たせている
 func (dl *DistributedLog) Append(record *api.Record) (uint64, error) {
 	res, err := dl.apply(AppendRequestType, &api.ProduceRequest{Record: record})
 	if err != nil {
@@ -166,12 +176,14 @@ func (dl *DistributedLog) apply(reqType RequestType, req proto.Message) (interfa
 		return nil, err
 	}
 
+	// Raft でコマンド実行（FSM で定義した内容が実施される）
 	timeout := 10 * time.Second
 	future := dl.raft.Apply(buf.Bytes(), timeout)
 	if future.Error() != nil {
 		return nil, future.Error()
 	}
 
+	// FSM の Apply メソッドが返したものが得られる
 	res := future.Response()
 	if err, ok := res.(error); ok {
 		return nil, err
@@ -181,6 +193,7 @@ func (dl *DistributedLog) apply(reqType RequestType, req proto.Message) (interfa
 }
 
 func (dl *DistributedLog) Read(offset uint64) (*api.Record, error) {
+	// ここでは緩やかな一貫性で良しとして、Raft を経由せず直接自分のを返している
 	return dl.log.Read(offset)
 }
 
