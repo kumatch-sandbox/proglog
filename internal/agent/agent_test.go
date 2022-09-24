@@ -11,6 +11,7 @@ import (
 	api "github.com/kumatch-sandbox/proglog/api/v1"
 	"github.com/kumatch-sandbox/proglog/internal/agent"
 	"github.com/kumatch-sandbox/proglog/internal/config"
+	"github.com/kumatch-sandbox/proglog/internal/loadbalance"
 	"github.com/stretchr/testify/require"
 	"github.com/travisjeffery/go-dynaport"
 	"google.golang.org/grpc"
@@ -123,7 +124,8 @@ func client(t *testing.T, agent *agent.Agent, tlsConfig *tls.Config) api.LogClie
 	rpcAddr, err := agent.Config.RPCAddr()
 	require.NoError(t, err)
 
-	conn, err := grpc.Dial(rpcAddr, opts...)
+	// gRPC に自前リゾルバを使った解決をしてもらうよう URL スキームを指定する
+	conn, err := grpc.Dial(fmt.Sprintf("%s:///%s", loadbalance.Name, rpcAddr), opts...)
 	require.NoError(t, err)
 
 	client := api.NewLogClient(conn)

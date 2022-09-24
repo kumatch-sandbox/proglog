@@ -59,6 +59,14 @@ func TestMultipleNodes(t *testing.T) {
 		distributedLogs = append(distributedLogs, dl)
 	}
 
+	// 準備できたサーバ x3 がクラスタ参加中として参照できる状態になっていることを確認
+	servers, err := distributedLogs[0].GetServers()
+	require.NoError(t, err)
+	require.Equal(t, 3, len(servers))
+	require.True(t, servers[0].IsLeader)
+	require.False(t, servers[1].IsLeader)
+	require.False(t, servers[2].IsLeader)
+
 	leader := distributedLogs[0]
 
 	// リーダーのサーバにレコードを追加していって、Raft経由で複製処理できたことを確認
@@ -90,7 +98,7 @@ func TestMultipleNodes(t *testing.T) {
 	}
 
 	// クラスタからサーバを１つ離脱させる
-	err := leader.Leave("1")
+	err = leader.Leave("1")
 	require.NoError(t, err)
 
 	time.Sleep(100 * time.Millisecond)
@@ -111,4 +119,11 @@ func TestMultipleNodes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, record.Value, joinedRes.Value)
 	require.Equal(t, offset, joinedRes.Offset)
+
+	// クラスタ参加中サーバが更新される
+	servers, err = distributedLogs[0].GetServers()
+	require.NoError(t, err)
+	require.Equal(t, 2, len(servers))
+	require.True(t, servers[0].IsLeader)
+	require.False(t, servers[1].IsLeader)
 }
